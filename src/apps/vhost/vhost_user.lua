@@ -182,6 +182,16 @@ function VhostUser:transmit_packets_to_vm ()
    local l = self.input.rx
    while l and not app.empty(l) and self.txring.used.idx ~= self.txused do
       local p = app.receive(l)
+      -- First push the virtio-net metadata.
+      -- (There is space for headers here too.)
+      local header = freelist.remove(self.vring_transmit_buffers)
+      ffi.copy(b.pointer, p.info, ffi.sizeof(p.info))
+      local mrg = ffi.cast("struct virtio_net_hdr_mrg_rxbuf &", b.pointer)
+      mrg.num_buffers = p.niovecs -- or +1 ?
+      local used = self.txring.used.ring[self.txused]
+      used.id = b.origin.info.virtio.descriptor_index
+      used.len = ffi.sizeof(mrg)
+      self.txused = (self.txused + 1) % 65536
       for i = 0, p.niovecs-1 do
          local iovec = p.iovecs[i]
          local used = self.txring.used.ring[self.txused]
@@ -197,7 +207,7 @@ function VhostUser:transmit_packets_to_vm ()
             iovec.buffer = b
             iovec.offset = 0
          end
-         used.id = iovec.buffer.origin.virtio.descriptor_index
+         used.id = iovec.buffer.origin.info.virtio.descriptor_index
          used.len = iovec.len
          self.txused = (self.txused + 1) % 65536
       end
@@ -287,22 +297,25 @@ end
 
 function VhostUser:set_vring_num (msg)
    self.vring_num = tonumber(msg.state.num)
-   debug("vring_num = " .. msg.state.num)
+   debug("vring_num", msg.state.num)
 end
 
 function VhostUser:set_vring_call (msg, fds, nfds)
    local idx = tonumber(msg.u64)
    assert(idx < 42)
    print(nfds, nfds)
-   assert(nfds == 1)
-   self.callfd[idx] = fds[0]
+   if nfds == 1 then
+--   assert(nfds == 1)
+      self.callfd[idx] = fds[0]
+   end
 end
 
 function VhostUser:set_vring_kick (msg, fds, nfds)
    local idx = tonumber(msg.u64)
    assert(idx < 42)
-   assert(nfds == 1)
-   self.kickfd[idx] = fds[0]
+   if nfds == 1 then
+      self.kickfd[idx] = fds[0]
+   end
 end
 
 function VhostUser:set_vring_addr (msg)
