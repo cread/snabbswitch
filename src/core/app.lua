@@ -4,7 +4,63 @@ local buffer    = require("core.buffer")
 local packet    = require("core.packet")
 local lib       = require("core.lib")
 local link_ring = require("core.link_ring")
-                  require("core.packet_h")
+local config = require("core.config")
+require("core.packet_h")
+
+configuration = config.new()
+
+active_apps  = {}
+active_links = {}
+
+-- Change to a new configuration.
+function configure (c)
+   local old = configuration
+   for name, info in pairs(c.apps) do
+      if old.apps[name] == nil then
+         -- create this app
+      elseif old.apps[name].class ~= c.apps[name].class then
+         -- replace this app
+      elseif old.apps[name].arg ~= c.apps[name].arg then
+         -- reconfigure this app
+      end
+   end
+   for name in pairs(old) do
+      if c.apps[name] == nil then
+         -- delete this app
+      end
+   end
+   -- Delete removed links
+   for link in pairs(active_links) do
+      if not c.links[link] then
+         -- delete this link
+      end
+   end
+   -- Add new links
+   for link in pairs(c.links) do
+      if not active_links[link] then
+         -- create this link
+      end
+   end
+end
+
+function selftest ()
+   local c = config.new()
+   c.app.vhost_user = {VhostUser, [[{path = "/home/luke/qemu.sock"}]]}
+   config.app(c, "vhost_user", VhostUser, [[{path = "/home/luke/qemu.sock"}]])
+   config.app(c, "intel",      Intel82599, [[{pciaddr = "0000:01:00.0"}]])
+   config.app(c, "vhost_tee",  Tee)
+   config.app(c, "intel_tee",  Tee)
+   config.app(c, "vhost_dump", PcapWriter, [[{filename = "/tmp/vhost.cap"}]])
+   config.app(c, "intel_dump", PcapWriter, [[{filename = "/tmp/intel.cap"}]])
+   -- VM->Network path
+   config.link(c, "vhost_user.tx -> vhost_tee.input")
+   config.link(c, " vhost_tee.dump -> vhost_dump.input")
+   config.link(c, " vhost_tee.xmit -> intel.rx")
+   -- Network->VM path
+   config.link(c, "intel.tx -> intel_tee.input")
+   config.link(c, " intel_tee.dump -> intel_dump.input")
+   config.link(c, " intel_tee.xmit -> vhost_user.rx")
+end
 
 --- # App runtime system
 
