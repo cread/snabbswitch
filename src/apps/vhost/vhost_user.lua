@@ -33,7 +33,6 @@ function VhostUser:new (socket_path)
                nfds = ffi.new("int[1]"),
                fds = ffi.new("int[?]", C.VHOST_USER_MEMORY_MAX_NREGIONS),
                socket_path = socket_path,
-               vring_base = {},
                callfd = {},
                kickfd = {},
                -- buffer records that are not currently in use
@@ -75,7 +74,7 @@ function VhostUser:receive_packets_from_vm ()
    assert(self.connected)
    while self.rxavail ~= self.rxring.avail.idx do
       C.full_memory_barrier()
-      local descriptor_id = self.rxring.avail.ring[self.rxavail % self.vring_num]
+      local descriptor_id = self.rxring.avail.ring[self.rxavail % self.rx_vring_num]
       local p = packet.allocate()
       local need_header = true
       local head_idx = nil
@@ -144,10 +143,13 @@ end
 
 -- Populate the `self.vring_transmit_buffers` freelist with buffers from the VM.
 function VhostUser:get_transmit_buffers_from_vm ()
-   debug("idx", self.txring.avail.idx, "idx2", self.rxring.avail.idx)
+   debug("txavail", self.txring.avail.idx,
+         "txused", self.txring.used.idx,
+         "rxavail", self.rxring.avail.idx,
+         "rxused", self.rxring.used.idx)
    while self.txavail ~= self.txring.avail.idx do
       -- Extract the first buffer and any that are chained to it via NEXT flag
-      local index = self.txring.avail.ring[self.txavail % self.vring_num]
+      local index = self.txring.avail.ring[self.txavail % self.tx_vring_num]
       repeat
          local desc  = self.txring.desc[index]
          local b = freelist.remove(self.buffer_recs) or lib.malloc("struct buffer")
@@ -183,7 +185,7 @@ function VhostUser:transmit_packets_to_vm ()
    while l and not app.empty(l) and self.txring.used.idx ~= self.txused do
       local p = app.receive(l)
       -- First push the virtio-net metadata.
-      -- (There is space for headers here too.)
+      -- (There is space for packet headers here too.)
       local header = freelist.remove(self.vring_transmit_buffers)
       ffi.copy(b.pointer, p.info, ffi.sizeof(p.info))
       local mrg = ffi.cast("struct virtio_net_hdr_mrg_rxbuf &", b.pointer)
@@ -192,6 +194,7 @@ function VhostUser:transmit_packets_to_vm ()
       used.id = b.origin.info.virtio.descriptor_index
       used.len = ffi.sizeof(mrg)
       self.txused = (self.txused + 1) % 65536
+      -- Now push the packet data.
       for i = 0, p.niovecs-1 do
          local iovec = p.iovecs[i]
          local used = self.txring.used.ring[self.txused]
@@ -296,18 +299,18 @@ function VhostUser:set_owner (msg)
 end
 
 function VhostUser:set_vring_num (msg)
-   self.vring_num = tonumber(msg.state.num)
-   debug("vring_num", msg.state.num)
+   local n = tonumber(msg.state.num)
+   if msg.state.index == 0 then
+      self.tx_vring_num = n
+   else
+      self.rx_vring_num = n
+   end
 end
 
 function VhostUser:set_vring_call (msg, fds, nfds)
+   assert(nfds == 1)
    local idx = tonumber(msg.u64)
-   assert(idx < 42)
-   print(nfds, nfds)
-   if nfds == 1 then
---   assert(nfds == 1)
-      self.callfd[idx] = fds[0]
-   end
+   self.callfd[idx] = fds[0]
 end
 
 function VhostUser:set_vring_kick (msg, fds, nfds)
@@ -327,12 +330,10 @@ function VhostUser:set_vring_addr (msg)
                   avail = ffi.cast("struct vring_avail &", avail) }
    if msg.addr.index == 0 then
       self.txring = ring
-      self.txavail = 0
-      self.txused = 0
+      self.txused = ring.used.idx
    else
       self.rxring = ring
-      self.rxavail = 0
-      self.rxused = 0
+      self.rxused = ring.used.idx
    end
    if self.rxring and self.txring then
       self.vhost_ready = true
@@ -342,12 +343,19 @@ function VhostUser:set_vring_addr (msg)
 end
 
 function VhostUser:set_vring_base (msg)
-   self.vring_base[msg.state.index] = msg.state.num
+   debug("set_vring_base", msg.state.index, msg.state.num)
+   if msg.state.index == 0 then
+      self.txavail = msg.state.num
+   else
+      self.rxavail = msg.state.num
+   end
 end
 
 function VhostUser:get_vring_base (msg)
    msg.size = 8
-   msg.u64 = self.vring_base[msg.state.index] or 0
+   local n
+   if msg.state.index == 0 then n = self.txavail else n = self.rxavail end
+   msg.u64 = n or 0
    self:reply(msg)
 end
 
@@ -446,7 +454,7 @@ function selftest ()
    local deadline = lib.timer(1e15)
    local fn = function ()
                  local vu = app.apps.vhost_user
-                 app.report()
+--                 app.report()
                  if vu.txring then
                     print("txavail", vu.txavail, "avail.idx", vu.txring.avail.idx)
                  end
